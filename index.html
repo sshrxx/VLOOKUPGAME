@@ -1,0 +1,1105 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CoC - Group Battle Arena (VLOOKUP Edition)</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
+    
+    body {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      background-color: #0b0f19;
+      color: #f1f5f9;
+      overflow-x: hidden;
+    }
+
+    .glass-card {
+      background: rgba(18, 24, 38, 0.85);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .gradient-text {
+      background: linear-gradient(135deg, #38bdf8 0%, #818cf8 50%, #c084fc 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .grid-cell {
+      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    
+    .grid-cell:hover:not(.answered) {
+      transform: translateY(-4px) scale(1.03);
+      box-shadow: 0 10px 25px -5px rgba(56, 189, 248, 0.3);
+    }
+
+    .answered {
+      opacity: 0.75;
+      filter: grayscale(20%);
+    }
+
+    @keyframes pulse-glow {
+      0%, 100% { box-shadow: 0 0 15px rgba(56, 189, 248, 0.2); }
+      50% { box-shadow: 0 0 25px rgba(56, 189, 248, 0.5); }
+    }
+
+    .timer-active {
+      animation: pulse-glow 1.5s infinite;
+    }
+
+    ::-webkit-scrollbar {
+      width: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0b0f19;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #1e293b;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #334155;
+    }
+  </style>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'coc-vlookup-battle-app';
+    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+      apiKey: "dummy", authDomain: "dummy", projectId: "dummy", storageBucket: "dummy", messagingSenderId: "dummy", appId: "dummy"
+    };
+
+    let app, db, auth, currentUser;
+    let unsubscribe = null;
+    let answeredQuestions = {};
+    
+    window.myRole = ''; 
+    window.selectedQuestionId = null;
+    window.isMuted = false;
+    window.timerInterval = null;
+    window.timerSeconds = 60;
+
+    async function initFirebase() {
+      try {
+        if (firebaseConfig && firebaseConfig.apiKey && firebaseConfig.apiKey !== "dummy") {
+          app = initializeApp(firebaseConfig);
+          auth = getAuth(app);
+          db = getFirestore(app);
+
+          if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+            await signInWithCustomToken(auth, __initial_auth_token);
+          } else {
+            await signInAnonymously(auth);
+          }
+          
+          currentUser = auth.currentUser;
+          // Auth completed successfully, ready to attach listeners when role is selected
+        }
+      } catch (e) {
+        console.warn("Firebase Init fallback to LocalStorage mode:", e);
+      }
+      
+      // Load local cache immediately to have visual baseline
+      try {
+        const saved = localStorage.getItem('coc_vlookup_answers');
+        if (saved) answeredQuestions = JSON.parse(saved);
+      } catch (e) {}
+    }
+    
+    initFirebase(); // Trigger initialization on load
+
+    const playSound = (type) => {
+      if (window.isMuted) return;
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+
+        if (type === 'correct') {
+          osc.frequency.setValueAtTime(523.25, ctx.currentTime);
+          osc.frequency.exponentialRampToValueAtTime(659.25, ctx.currentTime + 0.15);
+          osc.frequency.exponentialRampToValueAtTime(783.99, ctx.currentTime + 0.3);
+          gain.gain.setValueAtTime(0.3, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.4);
+        } else if (type === 'wrong') {
+          osc.type = 'sawtooth';
+          osc.frequency.setValueAtTime(220, ctx.currentTime);
+          osc.frequency.setValueAtTime(180, ctx.currentTime + 0.15);
+          gain.gain.setValueAtTime(0.3, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.3);
+        } else if (type === 'click') {
+          osc.frequency.setValueAtTime(400, ctx.currentTime);
+          gain.gain.setValueAtTime(0.1, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.05);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.05);
+        } else if (type === 'tick') {
+          osc.frequency.setValueAtTime(800, ctx.currentTime);
+          gain.gain.setValueAtTime(0.05, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.03);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.03);
+        }
+      } catch (e) { console.log(e); }
+    };
+
+    window.toggleSound = () => {
+      window.isMuted = !window.isMuted;
+      const btn = document.getElementById('mute-btn');
+      if (window.isMuted) {
+        btn.innerHTML = `<i class="fa-solid fa-volume-xmark text-rose-400"></i>`;
+      } else {
+        btn.innerHTML = `<i class="fa-solid fa-volume-high text-sky-400"></i>`;
+        playSound('click');
+      }
+    };
+
+    const cryptograms = [
+      // 1-20: Memecahkan Kata Rahasia (A=1...Z=26)
+      { id: 1, type: "Tingkat Mudah", level: "Easy", q: "11 - 15 - 16 - 9", key: "KOPI", hint: "Minuman penahan kantuk (K=11, O=15, P=16, I=9)" },
+      { id: 2, type: "Tingkat Mudah", level: "Easy", q: "2 - 5 - 12 - 1 - 10 - 1 - 18", key: "BELAJAR", hint: "Kewajiban setiap siswa di sekolah" },
+      { id: 3, type: "Tingkat Mudah", level: "Easy", q: "2 - 21 - 11 - 21", key: "BUKU", hint: "Jendela dunia tempat membaca" },
+      { id: 4, type: "Tingkat Mudah", level: "Easy", q: "22 - 12 - 15 - 15 - 11 - 21 - 16", key: "VLOOKUP", hint: "Rumus pencarian vertikal di Microsoft Excel" },
+      { id: 5, type: "Tingkat Mudah", level: "Easy", q: "12 - 15 - 15 - 11 - 21 - 16", key: "LOOKUP", hint: "Fungsi umum mencari/melihat data pada tabel" },
+      { id: 6, type: "Tingkat Mudah", level: "Easy", q: "20 - 1 - 2 - 5 - 12", key: "TABEL", hint: "Kumpulan baris dan kolom tempat menyimpan data" },
+      { id: 7, type: "Tingkat Mudah", level: "Easy", q: "11 - 15 - 12 - 15 - 13", key: "KOLOM", hint: "Jajaran sel tegak lurus dari atas ke bawah" },
+      { id: 8, type: "Tingkat Mudah", level: "Easy", q: "2 - 1 - 18 - 9 - 19", key: "BARIS", hint: "Jajaran sel mendatar dari kiri ke kanan" },
+      { id: 9, type: "Tingkat Mudah", level: "Easy", q: "18 - 1 - 14 - 7 - 5", key: "RANGE", hint: "Rentang beberapa sel di Excel (misal A2:C10)" },
+      { id: 10, type: "Tingkat Mudah", level: "Easy", q: "19 - 8 - 5 - 5 - 20", key: "SHEET", hint: "Lembar kerja di dalam file Excel" },
+      { id: 11, type: "Tingkat Mudah", level: "Easy", q: "18 - 5 - 6 - 5 - 18 - 5 - 14 - 19 - 9", key: "REFERENSI", hint: "Acuan alamat sel atau rentang pada rumus Excel" },
+      { id: 12, type: "Tingkat Mudah", level: "Easy", q: "1 - 2 - 19 - 15 - 12 - 21 - 20", key: "ABSOLUT", hint: "Sifat sel terkunci menggunakan tanda $" },
+      { id: 13, type: "Tingkat Mudah", level: "Easy", q: "6 - 1 - 12 - 19 - 5", key: "FALSE", hint: "Nilai logika range_lookup untuk pencarian Exact Match (0)" },
+      { id: 14, type: "Tingkat Mudah", level: "Easy", q: "20 - 18 - 21 - 5", key: "TRUE", hint: "Nilai logika range_lookup untuk Approximate Match (1)" },
+      { id: 15, type: "Tingkat Mudah", level: "Easy", q: "5 - 24 - 1 - 3 - 20", key: "EXACT", hint: "Pencarian data yang tepat sama persis tanpa toleransi" },
+      { id: 16, type: "Tingkat Mudah", level: "Easy", q: "13 - 1 - 20 - 3 - 8", key: "MATCH", hint: "Pencocokan data antara kata kunci dan tabel acuan" },
+      { id: 17, type: "Tingkat Mudah", level: "Easy", q: "9 - 14 - 4 - 5 - 24", key: "INDEX", hint: "Nomor urut posisi kolom atau baris" },
+      { id: 18, type: "Tingkat Mudah", level: "Easy", q: "22 - 1 - 12 - 21 - 5", key: "VALUE", hint: "Nilai atau isi data dari suatu sel" },
+      { id: 19, type: "Tingkat Mudah", level: "Easy", q: "5 - 18 - 18 - 15 - 18", key: "ERROR", hint: "Kondisi ketika rumus tidak dapat menemukan data (#N/A)" },
+      { id: 20, type: "Tingkat Mudah", level: "Easy", q: "11 - 21 - 14 - 3 - 9", key: "KUNCI", hint: "Kata/ID acuan utama untuk mencari data" },
+
+      // 21-40: Lanjutan Kata & Persamaan Matematika (Medium)
+      { id: 21, type: "Tingkat Sedang", level: "Medium", q: "4 - 1 - 20 - 1", key: "DATA", hint: "Kumpulan informasi yang diolah di spreadsheet" },
+      { id: 22, type: "Tingkat Sedang", level: "Medium", q: "19 - 5 - 12", key: "SEL", hint: "Pertemuan antara kolom dan baris (misal A1)" },
+      { id: 23, type: "Tingkat Sedang", level: "Medium", q: "18 - 21 - 13 - 21 - 19", key: "RUMUS", hint: "Formula kalkulasi diawali tanda sama dengan (=)" },
+      { id: 24, type: "Tingkat Sedang", level: "Medium", q: "7 - 21 - 18 - 21", key: "GURU", hint: "Pahlawan tanpa tanda jasa" },
+      { id: 25, type: "Tingkat Sedang", level: "Medium", q: "9 - 12 - 13 - 21", key: "ILMU", hint: "Pengetahuan yang dicari saat belajar" },
+      { id: 26, type: "Tingkat Sedang", level: "Medium", q: "D + E = ... (Huruf Apa?)", key: "I", hint: "D=4, E=5. Maka 4 + 5 = 9 (Huruf I)" },
+      { id: 27, type: "Tingkat Sedang", level: "Medium", q: "C × D = ... (Huruf Apa?)", key: "L", hint: "C=3, D=4. Maka 3 × 4 = 12 (Huruf L)" },
+      { id: 28, type: "Tingkat Sedang", level: "Medium", q: "T - K = ... (Huruf Apa?)", key: "I", hint: "T=20, K=11. Maka 20 - 11 = 9 (Huruf I)" },
+      { id: 29, type: "Tingkat Sedang", level: "Medium", q: "B × E = ... (Huruf Apa?)", key: "J", hint: "B=2, E=5. Maka 2 × 5 = 10 (Huruf J)" },
+      { id: 30, type: "Tingkat Sedang", level: "Medium", q: "H + G = ... (Huruf Apa?)", key: "O", hint: "H=8, G=7. Maka 8 + 7 = 15 (Huruf O)" },
+      { id: 31, type: "Tingkat Sedang", level: "Medium", q: "Z - K = ... (Huruf Apa?)", key: "O", hint: "Z=26, K=11. Maka 26 - 11 = 15 (Huruf O)" },
+      { id: 32, type: "Tingkat Sedang", level: "Medium", q: "C + P = ... (Huruf Apa?)", key: "S", hint: "C=3, P=16. Maka 3 + 16 = 19 (Huruf S)" },
+      { id: 33, type: "Tingkat Sedang", level: "Medium", q: "M - C = ... (Huruf Apa?)", key: "J", hint: "M=13, C=3. Maka 13 - 3 = 10 (Huruf J)" },
+      { id: 34, type: "Tingkat Sedang", level: "Medium", q: "E × D = ... (Huruf Apa?)", key: "T", hint: "E=5, D=4. Maka 5 × 4 = 20 (Huruf T)" },
+      { id: 35, type: "Tingkat Sedang", level: "Medium", q: "A + R = ... (Huruf Apa?)", key: "S", hint: "A=1, R=18. Maka 1 + 18 = 19 (Huruf S)" },
+      { id: 36, type: "Tingkat Sedang", level: "Medium", q: "X - D = ... (Huruf Apa?)", key: "T", hint: "X=24, D=4. Maka 24 - 4 = 20 (Huruf T)" },
+      { id: 37, type: "Tingkat Sedang", level: "Medium", q: "F + F = ... (Huruf Apa?)", key: "L", hint: "F=6, F=6. Maka 6 + 6 = 12 (Huruf L)" },
+      { id: 38, type: "Tingkat Sedang", level: "Medium", q: "G × C = ... (Huruf Apa?)", key: "U", hint: "G=7, C=3. Maka 7 × 3 = 21 (Huruf U)" },
+      { id: 39, type: "Tingkat Sedang", level: "Medium", q: "W - B = ... (Huruf Apa?)", key: "U", hint: "W=23, B=2. Maka 23 - 2 = 21 (Huruf U)" },
+      { id: 40, type: "Tingkat Sedang", level: "Medium", q: "D × F = ... (Huruf Apa?)", key: "X", hint: "D=4, F=6. Maka 4 × 6 = 24 (Huruf X)" },
+
+      // 41-50: Persamaan Matematika Lebih Kompleks (Hard)
+      { id: 41, type: "Tingkat Sulit", level: "Hard", q: "B + N = ... (Huruf Apa?)", key: "P", hint: "B=2, N=14. Maka 2 + 14 = 16 (Huruf P)" },
+      { id: 42, type: "Tingkat Sulit", level: "Hard", q: "Y - H = ... (Huruf Apa?)", key: "Q", hint: "Y=25, H=8. Maka 25 - 8 = 17 (Huruf Q)" },
+      { id: 43, type: "Tingkat Sulit", level: "Hard", q: "C × E = ... (Huruf Apa?)", key: "O", hint: "C=3, E=5. Maka 3 × 5 = 15 (Huruf O)" },
+      { id: 44, type: "Tingkat Sulit", level: "Hard", q: "I + J = ... (Huruf Apa?)", key: "S", hint: "I=9, J=10. Maka 9 + 10 = 19 (Huruf S)" },
+      { id: 45, type: "Tingkat Sulit", level: "Hard", q: "V - C = ... (Huruf Apa?)", key: "S", hint: "V=22, C=3. Maka 22 - 3 = 19 (Huruf S)" },
+      { id: 46, type: "Tingkat Sulit", level: "Hard", q: "B × K = ... (Huruf Apa?)", key: "V", hint: "B=2, K=11. Maka 2 × 11 = 22 (Huruf V)" },
+      { id: 47, type: "Tingkat Sulit", level: "Hard", q: "L + H = ... (Huruf Apa?)", key: "T", hint: "L=12, H=8. Maka 12 + 8 = 20 (Huruf T)" },
+      { id: 48, type: "Tingkat Sulit", level: "Hard", q: "E × E = ... (Huruf Apa?)", key: "Y", hint: "E=5, E=5. Maka 5 × 5 = 25 (Huruf Y)" },
+      { id: 49, type: "Tingkat Sulit", level: "Hard", q: "Z - B = ... (Huruf Apa?)", key: "X", hint: "Z=26, B=2. Maka 26 - 2 = 24 (Huruf X)" },
+      { id: 50, type: "Tingkat Sulit", level: "Hard", q: "M + M = ... (Huruf Apa?)", key: "Z", hint: "M=13, M=13. Maka 13 + 13 = 26 (Huruf Z)" }
+    ];
+
+    const excelQuestions = [
+      // EASY (1-20, 10-30 Poin) - Konsep Dasar & Sintaks
+      { id: 1, q: "Huruf 'V' pada nama fungsi VLOOKUP di Microsoft Excel merupakan singkatan dari...", opts: ["Vertical", "Virtual", "Variable", "Value"], ans: 0, pts: 10 },
+      { id: 2, q: "Fungsi utama dari rumus VLOOKUP adalah untuk mencari dan mengambil data secara...", opts: ["Horizontal berdasarkan baris", "Vertikal berdasarkan kolom kunci", "Acak di seluruh spreadsheet", "Diagonal antar sel"], ans: 1, pts: 10 },
+      { id: 3, q: "Pada sintaks =VLOOKUP(lookup_value; table_array; col_index_num; [range_lookup]), argumen lookup_value berarti...", opts: ["Kata kunci/nilai sel yang dicari", "Tabel acuan sumber data", "Nomor urut kolom hasil", "Tipe presisi pencarian"], ans: 0, pts: 15 },
+      { id: 4, q: "Argumen table_array pada rumus VLOOKUP berfungsi untuk menentukan...", opts: ["Kata kunci pencarian", "Rentang tabel acuan sumber data", "Nomor indeks kolom", "Kondisi TRUE/FALSE"], ans: 1, pts: 10 },
+      { id: 5, q: "Argumen col_index_num digunakan untuk menentukan...", opts: ["Jumlah total baris tabel", "Nomor urut kolom tabel acuan yang ingin diambil nilainya", "Nomor baris tempat mencari kunci", "Banyaknya sel yang dikunci"], ans: 1, pts: 15 },
+      { id: 6, q: "Jika kita ingin mencari data yang BENAR-BENAR SAMA PERSIS (Exact Match), maka argumen range_lookup diisi dengan...", opts: ["TRUE atau 1", "FALSE atau 0", "EXACT atau MATCH", "HIGH atau LOW"], ans: 1, pts: 15 },
+      { id: 7, q: "Jika argumen range_lookup diisi dengan TRUE atau 1, maka VLOOKUP akan melakukan pencarian bersifat...", opts: ["Sama persis tanpa toleransi", "Mendekati (Approximate Match) untuk rentang berurutan", "Mencari angka tertinggi saja", "Mengabaikan data teks"], ans: 1, pts: 20 },
+      { id: 8, q: "Mengapa rentang tabel acuan (table_array) sebaiknya dikunci menjadi absolut (misal $A$2:$C$10)?", opts: ["Agar ukuran huruf tidak berubah", "Agar rentang tabel tidak bergeser saat rumus disalin ke bawah", "Agar angka otomatis dijumlahkan", "Agar tampilan sel berwarna biru"], ans: 1, pts: 20 },
+      { id: 9, q: "Di manakah posisi kolom kata kunci pencarian (lookup_value) yang WAJIB berada pada tabel acuan VLOOKUP?", opts: ["Di kolom paling kanan", "Di kolom tengah", "Di kolom pertama (paling kiri) dari rentang tabel acuan", "Boleh di kolom mana saja"], ans: 2, pts: 25 },
+      { id: 10, q: "Shortcut tombol keyboard (Windows) untuk menambahkan tanda absolut ($) secara otomatis saat mengedit rumus adalah...", opts: ["F2", "F3", "F4", "F5"], ans: 2, pts: 20 },
+      { id: 11, q: "Pemisah argumen rumus Excel pada pengaturan Regional Indonesia umumnya menggunakan simbol...", opts: ["Koma (,)", "Titik koma (;)", "Titik (.)", "Titik dua (:)"], ans: 1, pts: 15 },
+      { id: 12, q: "Jika kata kunci pada lookup_value dituliskan langsung berupa teks di dalam rumus (misal kode A1), penulisan yang benar adalah...", opts: ["=VLOOKUP(A1; ...)", "=VLOOKUP(\"A1\"; ...)", "=VLOOKUP('A1'; ...)", "=VLOOKUP([A1]; ...)"], ans: 1, pts: 20 },
+      { id: 13, q: "Nilai bawaan (default) untuk argumen range_lookup jika dikosongkan (tidak diisi) oleh pengguna adalah...", opts: ["FALSE (0)", "TRUE (1)", "ERROR", "BLANK"], ans: 1, pts: 25 },
+      { id: 14, q: "Apa yang dihasilkan jika col_index_num diisi angka 1 pada =VLOOKUP(F2; A2:C10; 1; FALSE)?", opts: ["Mengembalikan nilai dari kolom pertama (kolom kunci itu sendiri)", "Mengembalikan nilai dari kolom kedua", "Error #REF!", "Layar menjadi kosong"], ans: 0, pts: 25 },
+      { id: 15, q: "Sifat pencarian huruf pada VLOOKUP adalah non-case sensitive. Artinya VLOOKUP...", opts: ["Membedakan huruf besar dan kecil", "Tidak membedakan huruf besar dan kecil (misal \"a1\" dan \"A1\" dianggap sama)", "Hanya membaca huruf kapital", "Menghapus huruf kecil otomatis"], ans: 1, pts: 30 },
+      { id: 16, q: "Fungsi yang digunakan untuk mencari data secara mendatar/horizontal pada sebuah tabel adalah...", opts: ["VLOOKUP", "HLOOKUP", "XLOOKUP", "MATCH"], ans: 1, pts: 20 },
+      { id: 17, q: "Apa fungsi dari tanda koma (,) atau titik koma (;) pada penulisan rumus VLOOKUP?", opts: ["Memisahkan antar argumen/komponen rumus", "Mengakhiri penulisan rumus", "Menandai teks", "Mengunci sel"], ans: 0, pts: 20 },
+      { id: 18, q: "Jika kita ingin mencari kecocokan data yang mendekati (Approximate Match), tabel referensi idealnya diurutkan secara...", opts: ["Acak (Random)", "Menaik (Ascending)", "Menurun (Descending)", "Berdasarkan warna"], ans: 1, pts: 25 },
+      { id: 19, q: "Pesan error apa yang muncul jika kita salah mengetikkan nama fungsi VLOOKUP (misal menjadi =VLOKUP)?", opts: ["#N/A", "#REF!", "#VALUE!", "#NAME?"], ans: 3, pts: 25 },
+      { id: 20, q: "Tanda apa yang harus selalu diketikkan paling awal sebelum menulis fungsi VLOOKUP di dalam sel?", opts: ["Tanda Tambah (+)", "Tanda Kutip (\")", "Tanda Sama Dengan (=)", "Tanda Titik Dua (:)"], ans: 2, pts: 25 },
+
+      // MEDIUM (21-40, 40-60 Poin) - Simulasi Tabel & Kalkulasi Lanjutan
+      { id: 21, q: "Jika sel E2 berisi teks \"A2\" dan berdasarkan tabel acuan di bawah ini (Rentang A2:C4), hasil rumus =VLOOKUP(E2; A2:C4; 2; FALSE) adalah...", table: { headers: ["A (Kode)", "B (Barang)", "C (Harga)"], rows: [["A1", "Buku", "5000"], ["A2", "Pensil", "2000"], ["A3", "Penggaris", "3000"]] }, opts: ["Buku", "Pensil", "2000", "A2"], ans: 1, pts: 40 },
+      { id: 22, q: "Jika sel F2 berisi teks \"P-03\" dan berdasarkan tabel acuan di bawah ini (Rentang A2:C4), hasil rumus =VLOOKUP(F2; A2:C4; 3; FALSE) adalah...", table: { headers: ["A (ID)", "B (Produk)", "C (Stok)"], rows: [["P-01", "Laptop", "15"], ["P-02", "Mouse", "50"], ["P-03", "Keyboard", "30"]] }, opts: ["Keyboard", "Mouse", "30", "50"], ans: 2, pts: 40 },
+      { id: 23, q: "Jika sel F2 berisi teks \"M1\" dan berdasarkan tabel acuan di bawah ini (Rentang A2:C4), hasil rumus =VLOOKUP(F2; A2:C4; 3; FALSE) * 2 adalah...", table: { headers: ["A (Kode)", "B (Menu)", "C (Harga)"], rows: [["M1", "Nasgor", "15000"], ["M2", "Mie", "12000"], ["M3", "EsTeh", "4000"]] }, opts: ["15000", "24000", "30000", "#VALUE!"], ans: 2, pts: 50 },
+      { id: 24, q: "Jika sel G2 berisi angka 102 dan berdasarkan tabel acuan di bawah ini (Rentang B2:D4), hasil rumus =VLOOKUP(G2; B2:D4; 2; FALSE) adalah...", table: { headers: ["B (NIM)", "C (Nama)", "D (Jurusan)"], rows: [["101", "Ani", "IPA"], ["102", "Budi", "IPS"], ["103", "Cici", "Bahasa"]] }, opts: ["102", "Budi", "IPS", "Ani"], ans: 1, pts: 45 },
+      { id: 25, q: "Jika sel D2 berisi angka 78 dan berdasarkan tabel acuan di bawah ini (Rentang A2:B4), hasil rumus =VLOOKUP(D2; A2:B4; 2; TRUE) adalah...", table: { headers: ["A (Nilai Min)", "B (Predikat)"], rows: [["0", "Cukup"], ["70", "Baik"], ["85", "Sangat Baik"]] }, opts: ["Cukup", "Baik", "Sangat Baik", "#N/A"], ans: 1, pts: 50 },
+      { id: 26, q: "Jika sel F2 berisi teks \"MDN\" dan berdasarkan tabel acuan di bawah ini (Rentang A2:C4), hasil rumus =VLOOKUP(F2; A2:C4; 2; FALSE) adalah...", table: { headers: ["A (Kode)", "B (Kota)", "C (Tarif)"], rows: [["JK", "Jakarta", "10k"], ["BD", "Bandung", "15k"], ["SBY", "Surabaya", "20k"]] }, opts: ["Jakarta", "Kosong", "#N/A", "#REF!"], ans: 2, pts: 45 },
+      { id: 27, q: "Jika sel E2 berisi teks \"S-1\" dan berdasarkan tabel acuan di bawah ini (Rentang A2:B3), hasil rumus =VLOOKUP(E2; A2:B3; 3; FALSE) adalah...", table: { headers: ["A (ID)", "B (Status)"], rows: [["S-1", "Aktif"], ["S-2", "Cuti"]] }, opts: ["Aktif", "S-1", "#REF!", "#N/A"], ans: 2, pts: 50 },
+      { id: 28, q: "Jika sel E2 berisi teks \"G01\" dan berdasarkan tabel acuan di bawah ini (Rentang A2:C3), hasil dari =VLOOKUP(E2; A2:C3; 2; FALSE) & \", \" & VLOOKUP(E2; A2:C3; 3; FALSE) adalah...", table: { headers: ["A (Kode)", "B (Nama)", "C (Gelar)"], rows: [["G01", "Ahmad", "S.Pd."], ["G02", "Siti", "M.Pd."]] }, opts: ["Ahmad S.Pd.", "Ahmad, S.Pd.", "Siti, M.Pd.", "Error"], ans: 1, pts: 60 },
+      { id: 29, q: "Jika sel E2 berisi teks \"X-20\" dan berdasarkan tabel acuan di bawah ini (Rentang A2:C3), hasil rumus =VLOOKUP(E2; A2:C3; 1; FALSE) adalah...", table: { headers: ["A (SKU)", "B (Tipe)", "C (Warna)"], rows: [["X-10", "Shirt", "Merah"], ["X-20", "Pants", "Biru"]] }, opts: ["X-20", "Pants", "Biru", "1"], ans: 0, pts: 45 },
+      { id: 30, q: "Jika sel E2 berisi angka 2 dan berdasarkan tabel acuan di bawah ini (Rentang A2:C4), hasil rumus =VLOOKUP(E2; A2:C4; 2; 0) adalah...", table: { headers: ["A (No)", "B (Bulan)", "C (Hari)"], rows: [["1", "Jan", "31"], ["2", "Feb", "28"], ["3", "Mar", "31"]] }, opts: ["Januari", "Februari", "28", "Maret"], ans: 1, pts: 45 },
+      { id: 31, q: "Jika sel D2 berisi teks \"super50\" dan berdasarkan tabel acuan di bawah ini (Rentang A2:B3), hasil rumus =VLOOKUP(D2; A2:B3; 2; FALSE) adalah...", table: { headers: ["A (Voucher)", "B (Diskon)"], rows: [["hemat10", "10%"], ["super50", "50%"]] }, opts: ["#N/A", "10%", "50%", "super50"], ans: 2, pts: 50 },
+      { id: 32, q: "Jika sel E2 berisi teks \"K-01\" dan berdasarkan tabel acuan di bawah ini (Rentang A2:C3), hasil rumus =VLOOKUP(E2; A2:C3; 1; FALSE) adalah...", table: { headers: ["A (Nama)", "B (Kode)", "C (Nilai)"], rows: [["Roni", "K-01", "90"], ["Rina", "K-02", "85"]] }, opts: ["Roni", "K-01", "90", "#N/A"], ans: 3, pts: 55 },
+      { id: 33, q: "Jika sel E2 berisi teks \"B-100\" dan terdapat tabel acuan di bawah ini (Rentang A2:B3).\nHasil rumus =VLOOKUP(E2; A2:B3; 2; FALSE) adalah...", table: { headers: ["A (Kode)", "B (Rak)"], rows: [["B-100", "Rak A"], ["B-200", "Rak B"]] }, opts: ["B-100", "Rak A", "Rak B", "E2"], ans: 1, pts: 50 },
+      { id: 34, q: "Jika sel D2=\"Star\" dan sel E2=\"Coin\", berdasarkan tabel acuan (Rentang A2:B3) di bawah, hasil dari =VLOOKUP(D2; A2:B3; 2; FALSE) + VLOOKUP(E2; A2:B3; 2; FALSE) adalah...", table: { headers: ["A (Item)", "B (Poin)"], rows: [["Star", "50"], ["Coin", "10"]] }, opts: ["50", "10", "60", "StarCoin"], ans: 2, pts: 60 },
+      { id: 35, q: "Jika rentang tabel acuan diatur dari D2:G20, maka kolom F berada pada nomor col_index_num ke...", opts: ["1", "2", "3", "4"], ans: 2, pts: 45 },
+      { id: 36, q: "Sebuah tabel acuan memiliki rentang B5:E15. Jika kita ingin mengambil data dari kolom E, nomor col_index_num yang dituliskan adalah...", opts: ["2", "3", "4", "5"], ans: 2, pts: 45 },
+      { id: 37, q: "Fungsi VLOOKUP tidak dapat mengambil data di sebelah kiri kolom kunci pencarian. Keterbatasan ini sering dikenal sebagai...", opts: ["Left-to-Right Lookup Limit", "Top-to-Bottom Limit", "Reverse Lookup", "Absolute Limit"], ans: 0, pts: 50 },
+      { id: 38, q: "Rumus =VLOOKUP(A2; $C$2:$E$10; 2; FALSE) disalin dari baris 2 ke baris 5. Bagian rumus yang berubah otomatis adalah...", opts: ["A2 menjadi A5", "$C$2:$E$10 menjadi $C$5:$E$13", "Angka 2 menjadi 5", "FALSE menjadi TRUE"], ans: 0, pts: 50 },
+      { id: 39, q: "Keunggulan menggunakan Named Range (misal memberi nama tabel \"TabelGaji\") pada table_array VLOOKUP adalah...", opts: ["Mempercepat koneksi internet", "Otomatis bersifat absolut tanpa perlu tanda $", "Menghapus huruf kapital", "Menghilangkan baris kosong"], ans: 1, pts: 55 },
+      { id: 40, q: "Pesan error #N/A pada hasil rumus VLOOKUP paling sering disebabkan oleh...", opts: ["Indeks kolom melebihi rentang tabel", "Kata kunci (lookup_value) tidak ditemukan pada kolom pertama tabel acuan", "Tanda kurung kurang", "Format sel bernilai negatif"], ans: 1, pts: 60 },
+
+      // HARD (41-50, 70-100 Poin) - Troubleshooting Error & Fungsi Kompleks
+      { id: 41, q: "Jika sel D2 berisi angka 33 dan berdasarkan tabel acuan di bawah ini (Rentang A2:B3), hasil rumus =IFERROR(VLOOKUP(D2; A2:B3; 2; FALSE); \"Tidak Ditemukan\") adalah...", table: { headers: ["A (NIP)", "B (Jabatan)"], rows: [["11", "Manajer"], ["22", "Staf"]] }, opts: ["#N/A", "Staf", "Tidak Ditemukan", "Manajer"], ans: 2, pts: 70 },
+      { id: 42, q: "Pesan error #REF! pada rumus VLOOKUP terjadi apabila...", opts: ["Kata kunci tidak ditemukan", "Nilai col_index_num lebih besar dari jumlah kolom pada table_array", "Tabel acuan disembunyikan", "Sel acuan berupa angka"], ans: 1, pts: 75 },
+      { id: 43, q: "Pesan error #VALUE! pada VLOOKUP dapat muncul jika pengguna mengisikan col_index_num dengan...", opts: ["Angka kurang dari 1 (misalnya 0 atau angka negatif)", "Angka genap", "Teks \"FALSE\"", "Teks \"TRUE\""], ans: 0, pts: 80 },
+      { id: 44, q: "Sel A2 berisi \"BRG-01\". Kita ingin mencari harga di tabel G2:H10 berdasarkan 2 karakter dari kanan (\"01\"). Penulisan rumus yang tepat:", opts: ["=VLOOKUP(RIGHT(A2;2); $G$2:$H$10; 2; FALSE)", "=VLOOKUP(LEFT(A2;2); $G$2:$H$10; 2; FALSE)", "=VLOOKUP(MID(A2;2;2); $G$2:$H$10; 2; FALSE)", "=VLOOKUP(LEN(A2); $G$2:$H$10; 2; FALSE)"], ans: 0, pts: 85 },
+      { id: 45, q: "Rumus =IFERROR(VLOOKUP(A2; $D$2:$F$10; 3; FALSE); 0) * C2. Jika VLOOKUP menghasilkan #N/A dan C2 = 5, berapa hasil akhir rumus tersebut?", opts: ["0", "#N/A", "5", "#VALUE!"], ans: 0, pts: 85 },
+      { id: 46, q: "Terdapat tabel acuan diskon bertingkat (Rentang A2:B4) di bawah ini.\nJika sel E2 (Total Belanja) berisi angka 350000, maka hasil rumus =VLOOKUP(E2; A2:B4; 2; TRUE) adalah...", table: { headers: ["A (Belanja Min.)", "B (Diskon)"], rows: [["0", "0%"], ["100000", "5%"], ["500000", "10%"]] }, opts: ["0%", "5%", "10%", "#N/A"], ans: 1, pts: 80 },
+      { id: 47, q: "Apa yang terjadi jika pada tabel acuan VLOOKUP terdapat dua baris data dengan kata kunci (lookup_value) yang SAMA PERSIS (duplikat)?", opts: ["VLOOKUP mengambil data dari baris paling atas (pertama ditemukan)", "VLOOKUP mengambil data dari baris paling bawah", "Menghasilkan error #DUPLICATE!", "Menjumlahkan kedua nilai data"], ans: 0, pts: 90 },
+      { id: 48, q: "Untuk menghapus spasi tak sengaja di awal/akhir kata kunci agar VLOOKUP tidak gagal mencocokkan teks, fungsi pendukungnya adalah...", opts: ["TRIM", "CLEAN", "LOWER", "REPLACE"], ans: 0, pts: 75 },
+      { id: 49, q: "Sel A2 = \" B-01\" (ada spasi di awal). Tabel acuan menyimpan kode \"B-01\". Penulisan VLOOKUP yang tepat agar data berhasil ditemukan:", opts: ["=VLOOKUP(TRIM(A2); $E$2:$F$10; 2; FALSE)", "=VLOOKUP(CLEAN(A2); $E$2:$F$10; 2; FALSE)", "=VLOOKUP(A2; $E$2:$F$10; 2; FALSE)", "=VLOOKUP(UPPER(A2); $E$2:$F$10; 2; FALSE)"], ans: 0, pts: 85 },
+      { id: 50, q: "Rumus =IF(VLOOKUP(A2; $B$2:$D$10; 3; FALSE) >= 75; \"LULUS\"; \"REMIDI\"). Jika hasil VLOOKUP bernilai 80, maka output teks akhir adalah...", opts: ["LULUS", "REMIDI", "80", "TRUE"], ans: 0, pts: 95 }
+    ];
+
+    const groupConfig = [
+      { id: 'Kelompok 1', name: 'Kelompok 1', color: 'bg-cyan-500', text: 'text-cyan-400', border: 'border-cyan-500' },
+      { id: 'Kelompok 2', name: 'Kelompok 2', color: 'bg-indigo-500', text: 'text-indigo-400', border: 'border-indigo-500' },
+      { id: 'Kelompok 3', name: 'Kelompok 3', color: 'bg-purple-500', text: 'text-purple-400', border: 'border-purple-500' },
+      { id: 'Kelompok 4', name: 'Kelompok 4', color: 'bg-rose-500', text: 'text-rose-400', border: 'border-rose-500' },
+      { id: 'Kelompok 5', name: 'Kelompok 5', color: 'bg-amber-500', text: 'text-amber-400', border: 'border-amber-500' },
+      { id: 'Kelompok 6', name: 'Kelompok 6', color: 'bg-emerald-500', text: 'text-emerald-400', border: 'border-emerald-500' },
+      { id: 'Kelompok 7', name: 'Kelompok 7', color: 'bg-fuchsia-500', text: 'text-fuchsia-400', border: 'border-fuchsia-500' },
+      { id: 'Kelompok 8', name: 'Kelompok 8', color: 'bg-teal-500', text: 'text-teal-400', border: 'border-teal-500' }
+    ];
+
+    window.selectRole = (role) => {
+      playSound('click');
+      if (role === 'teacher') {
+        document.getElementById('teacher-pin-input').value = '';
+        document.getElementById('pin-error-msg').classList.add('hidden');
+        document.getElementById('pin-modal').classList.remove('hidden');
+      } else {
+        activateRole('student');
+      }
+    };
+
+    window.verifyTeacherPin = () => {
+      const inputPin = document.getElementById('teacher-pin-input').value.trim();
+      if (inputPin === "informatik@") {
+        playSound('correct');
+        document.getElementById('pin-modal').classList.add('hidden');
+        activateRole('teacher');
+      } else {
+        playSound('wrong');
+        const errEl = document.getElementById('pin-error-msg');
+        errEl.innerText = "PIN Salah! Akses ditolak.";
+        errEl.classList.remove('hidden');
+      }
+    };
+
+    window.closePinModal = () => {
+      playSound('click');
+      document.getElementById('pin-modal').classList.add('hidden');
+    };
+
+    function activateRole(role) {
+      window.myRole = role;
+      document.getElementById('role-selection-screen').classList.add('hidden');
+      document.getElementById('main-game-screen').classList.remove('hidden');
+
+      const badge = document.getElementById('role-badge');
+      if (role === 'teacher') {
+        badge.className = 'px-3 py-1 rounded-full text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center gap-1.5';
+        badge.innerHTML = `<i class="fa-solid fa-user-tie"></i> Mode Guru / Proktor`;
+        document.getElementById('teacher-controls').classList.remove('hidden');
+      } else {
+        badge.className = 'px-3 py-1 rounded-full text-xs font-bold bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 flex items-center gap-1.5';
+        badge.innerHTML = `<i class="fa-solid fa-users"></i> Mode Murid / Peserta`;
+        document.getElementById('teacher-controls').classList.add('hidden');
+      }
+
+      initFirestoreSync();
+    }
+
+    function initFirestoreSync() {
+      // Must authenticate first as per RULE 3.
+      if (!db || !currentUser) {
+        console.warn("Firestore tidak terhubung atau user belum login. Berjalan dalam mode lokal.");
+        renderGameGrid();
+        renderScoreboard();
+        return;
+      }
+
+      try {
+        const answersRef = collection(db, 'artifacts', appId, 'public', 'data', 'answers');
+        unsubscribe = onSnapshot(answersRef, (snapshot) => {
+          answeredQuestions = {};
+          snapshot.forEach((docSnap) => {
+            const data = docSnap.data();
+            answeredQuestions[data.questionId] = data;
+          });
+          try {
+            localStorage.setItem('coc_vlookup_answers', JSON.stringify(answeredQuestions));
+          } catch(e){}
+          renderGameGrid();
+          renderScoreboard();
+        }, (error) => {
+          console.error("Firestore Listen Error:", error);
+          renderGameGrid();
+          renderScoreboard();
+        });
+      } catch (e) {
+        console.error("Firestore error:", e);
+        renderGameGrid();
+        renderScoreboard();
+      }
+    }
+
+    function renderScoreboard() {
+      const scores = {};
+      const solvedCounts = {};
+      
+      groupConfig.forEach(g => {
+        scores[g.name] = 0;
+        solvedCounts[g.name] = 0;
+      });
+
+      Object.values(answeredQuestions).forEach(item => {
+        if (scores[item.group] !== undefined) {
+          scores[item.group] += item.points || 0;
+          solvedCounts[item.group] += 1;
+        }
+      });
+
+      const container = document.getElementById('scoreboard-container');
+      container.innerHTML = groupConfig.map(g => {
+        const score = scores[g.name];
+        const count = solvedCounts[g.name];
+        return `
+          <div class="glass-card p-3 rounded-2xl border-l-4 ${g.border} flex flex-col justify-between relative overflow-hidden shadow-lg">
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="font-bold text-xs tracking-wide ${g.text}">${g.name}</span>
+              <span class="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 font-mono">${count} Soal</span>
+            </div>
+            <div class="flex items-baseline justify-between">
+              <span class="text-2xl font-extrabold text-white font-mono tracking-tight">${score}</span>
+              <span class="text-[10px] text-slate-400">PTS</span>
+            </div>
+            <div class="w-full bg-slate-800 h-1.5 rounded-full mt-2.5 overflow-hidden">
+              <div class="${g.color} h-full transition-all duration-500" style="width: ${Math.min(100, (score / 500) * 100)}%"></div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      const totalAnswered = Object.keys(answeredQuestions).length;
+      document.getElementById('total-progress-text').innerText = `${totalAnswered} / 50 Selesai`;
+      document.getElementById('total-progress-bar').style.width = `${(totalAnswered / 50) * 100}%`;
+    }
+
+    function renderGameGrid() {
+      const gridContainer = document.getElementById('grid-container');
+      let html = '';
+
+      for (let i = 1; i <= 50; i++) {
+        const isAnswered = answeredQuestions[i];
+        const excelData = excelQuestions.find(e => e.id === i);
+
+        let badgeColor = 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30';
+        let levelLabel = 'EASY';
+        if (excelData.pts >= 40 && excelData.pts <= 60) {
+          badgeColor = 'bg-amber-500/20 text-amber-400 border-amber-500/30';
+          levelLabel = 'MED';
+        } else if (excelData.pts >= 70) {
+          badgeColor = 'bg-rose-500/20 text-rose-400 border-rose-500/30';
+          levelLabel = 'HARD';
+        }
+
+        if (isAnswered) {
+          const grp = groupConfig.find(g => g.name === isAnswered.group) || groupConfig[0];
+          html += `
+            <div class="glass-card answered rounded-2xl p-3 flex flex-col justify-between items-center relative border border-slate-700/50 cursor-not-allowed bg-slate-900/60 h-32">
+              <div class="w-full flex justify-between items-center text-[10px] font-bold">
+                <span class="text-slate-500">#${i}</span>
+                <span class="px-1.5 py-0.5 rounded ${grp.color} text-white font-extrabold text-[9px] truncate max-w-[70px]">${isAnswered.group}</span>
+              </div>
+              <div class="my-1 text-center">
+                <i class="fa-solid fa-circle-check text-2xl text-emerald-400 mb-0.5"></i>
+                <div class="text-xs font-bold text-slate-300">+${isAnswered.points} Pts</div>
+              </div>
+              <div class="text-[10px] text-slate-500 font-mono">SELESAI</div>
+            </div>
+          `;
+        } else {
+          html += `
+            <button onclick="handleTileClick(${i})" class="grid-cell glass-card rounded-2xl p-3 flex flex-col justify-between items-center relative border border-slate-800 text-left w-full h-32 hover:border-sky-500/50 group bg-slate-900/80 cursor-pointer">
+              <div class="w-full flex justify-between items-center">
+                <span class="font-extrabold text-sm text-slate-300 group-hover:text-sky-400">#${i}</span>
+                <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border ${badgeColor}">${levelLabel}</span>
+              </div>
+              <div class="my-1 text-center">
+                <div class="text-xs text-slate-400 font-medium">Cryptogram</div>
+                <div class="text-lg font-black text-white group-hover:scale-110 transition-transform">${excelData.pts} <span class="text-xs text-sky-400 font-normal">PTS</span></div>
+              </div>
+              <div class="w-full pt-1 border-t border-slate-800/80 flex items-center justify-between text-[10px] text-slate-400">
+                <span><i class="fa-solid fa-key text-amber-400/80 mr-1"></i>Kode</span>
+                <span class="group-hover:translate-x-1 transition-transform font-semibold text-sky-400">Buka <i class="fa-solid fa-arrow-right text-[8px]"></i></span>
+              </div>
+            </button>
+          `;
+        }
+      }
+
+      gridContainer.innerHTML = html;
+    }
+
+    window.handleTileClick = (id) => {
+      playSound('click');
+      window.selectedQuestionId = id;
+
+      if (window.myRole === 'student') {
+        openStudentCryptogramModal(id);
+      } else if (window.myRole === 'teacher') {
+        openTeacherVerificationModal(id);
+      }
+    };
+
+    function openStudentCryptogramModal(id) {
+      const crypto = cryptograms.find(c => c.id === id);
+      const excel = excelQuestions.find(e => e.id === id);
+
+      // Generate HTML Tabel jika soal memiliki data tabel
+      let tableHtml = '';
+      if (excel.table) {
+        tableHtml = `
+          <div class="my-3.5 overflow-x-auto rounded-lg border border-slate-700 bg-slate-900/80 shadow-inner">
+            <table class="w-full text-left text-xs whitespace-nowrap">
+              <thead class="bg-slate-800 text-slate-300 font-bold border-b border-slate-700">
+                <tr>
+                  ${excel.table.headers.map(h => `<th class="px-3 py-2 border-r border-slate-700 last:border-r-0 bg-slate-800/80 text-center">${h}</th>`).join('')}
+                </tr>
+              </thead>
+              <tbody class="text-slate-300">
+                ${excel.table.rows.map(row => `
+                  <tr class="border-b border-slate-700/50 last:border-b-0">
+                    ${row.map((cell, i) => `<td class="px-3 py-2 border-r border-slate-700/50 last:border-r-0 ${i===0 ? 'font-mono text-center text-amber-300 font-semibold bg-slate-800/30' : 'text-center'}">${cell}</td>`).join('')}
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        `;
+      }
+
+      document.getElementById('modal-title').innerText = `SOAL ARENA #${id} (${excel.pts} PTS)`;
+      document.getElementById('modal-body').innerHTML = `
+        <div class="space-y-4">
+          <!-- SOAL EXCEL -->
+          <div class="p-4 rounded-xl bg-slate-950 border border-sky-500/40 space-y-3">
+            <div class="flex items-center justify-between border-b border-slate-800/80 pb-2">
+              <span class="text-xs font-bold text-sky-400 uppercase tracking-wider flex items-center gap-1.5">
+                <i class="fa-solid fa-file-excel text-emerald-400"></i> Pertanyaan VLOOKUP:
+              </span>
+              <span class="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-sky-500/20 text-sky-300 border border-sky-500/30">
+                ${excel.pts} PTS
+              </span>
+            </div>
+            
+            <p class="text-sm font-semibold text-white leading-relaxed whitespace-pre-line">${excel.q}</p>
+            ${tableHtml}
+            
+            <div class="grid grid-cols-1 gap-2 pt-1">
+              ${excel.opts.map((opt, oIdx) => `
+                <div class="p-2.5 rounded-xl border border-slate-800 bg-slate-900/80 flex items-center text-xs">
+                  <span class="w-6 h-6 rounded-lg bg-slate-800 text-slate-300 flex items-center justify-center font-bold mr-2.5 shrink-0">
+                    ${String.fromCharCode(65 + oIdx)}
+                  </span>
+                  <span class="text-slate-200 font-medium">${opt}</span>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+
+          <!-- KODE CRYPTOGRAM -->
+          <div class="p-4 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2.5">
+            <div class="flex items-center justify-between">
+              <span class="px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                <i class="fa-solid fa-puzzle-piece mr-1"></i> Kode Cryptogram: ${crypto.type}
+              </span>
+              <button onclick="toggleAZChart()" class="text-[11px] text-sky-400 hover:underline flex items-center gap-1 font-semibold">
+                <i class="fa-solid fa-table-cells"></i> Tabel A-Z
+              </button>
+            </div>
+            <p class="text-xs text-slate-400">Pecahkan kode rahasia di bawah ini untuk kunci pembuka di layar Guru:</p>
+            
+            <div class="p-3.5 rounded-xl bg-slate-950 border border-amber-500/30 text-center">
+              <div class="text-2xl font-black font-mono text-amber-300 tracking-wider select-all">${crypto.q}</div>
+            </div>
+
+            <!-- Interactive A-Z Quick Lookup Helper -->
+            <div id="az-lookup-chart" class="hidden pt-2 border-t border-slate-800">
+              <div class="text-[10px] font-bold text-slate-400 mb-1.5 uppercase">Tabel Kode Huruf A=1 s/d Z=26:</div>
+              <div class="grid grid-cols-6 sm:grid-cols-9 gap-1 text-[10px] font-mono text-center">
+                ${'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((char, index) => `
+                  <div class="bg-slate-950 p-1 rounded border border-slate-800">
+                    <span class="text-amber-400 font-bold">${char}</span>=<span class="text-slate-300">${index + 1}</span>
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+          </div>
+
+          <!-- PETUNJUK -->
+          <div class="p-3 rounded-xl bg-indigo-950/40 border border-indigo-500/30 text-xs text-indigo-300 flex items-start gap-2 leading-relaxed">
+            <i class="fa-solid fa-circle-info mt-0.5 text-indigo-400"></i>
+            <div>
+              <strong>Alur Diskusi:</strong> Selesaikan soal VLOOKUP dan kode Cryptogram bersama kelompokmu. Jika sudah yakin, majulah ke layar <strong>GURU</strong> untuk memasukkan kode & menginput jawaban!
+            </div>
+          </div>
+        </div>
+      `;
+
+      openModal();
+    }
+
+    window.toggleAZChart = () => {
+      playSound('click');
+      const chart = document.getElementById('az-lookup-chart');
+      if (chart) chart.classList.toggle('hidden');
+    };
+
+    function openTeacherVerificationModal(id) {
+      const crypto = cryptograms.find(c => c.id === id);
+      const excel = excelQuestions.find(e => e.id === id);
+
+      // Generate HTML Tabel untuk Guru (sama seperti murid)
+      let tableHtml = '';
+      if (excel.table) {
+        tableHtml = `
+          <div class="my-3.5 overflow-x-auto rounded-lg border border-slate-700 bg-slate-900/80 shadow-inner">
+            <table class="w-full text-left text-xs whitespace-nowrap">
+              <thead class="bg-slate-800 text-slate-300 font-bold border-b border-slate-700">
+                <tr>
+                  ${excel.table.headers.map(h => `<th class="px-3 py-2 border-r border-slate-700 last:border-r-0 bg-slate-800/80 text-center">${h}</th>`).join('')}
+                </tr>
+              </thead>
+              <tbody class="text-slate-300">
+                ${excel.table.rows.map(row => `
+                  <tr class="border-b border-slate-700/50 last:border-b-0">
+                    ${row.map((cell, i) => `<td class="px-3 py-2 border-r border-slate-700/50 last:border-r-0 ${i===0 ? 'font-mono text-center text-amber-300 font-semibold bg-slate-800/30' : 'text-center'}">${cell}</td>`).join('')}
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        `;
+      }
+
+      document.getElementById('modal-title').innerText = `VERIFIKASI GURU - SOAL #${id} (${excel.pts} PTS)`;
+      document.getElementById('modal-body').innerHTML = `
+        <div class="space-y-4">
+          <!-- Step 1: Pilih Kelompok -->
+          <div>
+            <label class="block text-xs font-bold text-slate-300 mb-1.5">1. Pilih Kelompok Penjawab:</label>
+            <div class="grid grid-cols-4 sm:grid-cols-8 gap-1.5" id="group-selector">
+              ${groupConfig.map((g, idx) => `
+                <button type="button" onclick="selectTeacherGroup('${g.name}')" id="btn-group-${idx}" class="group-select-btn p-1.5 rounded-xl border border-slate-700 bg-slate-900 text-[11px] font-bold text-slate-300 hover:border-sky-500 transition-all text-center cursor-pointer">
+                  ${g.name}
+                </button>
+              `).join('')}
+            </div>
+            <input type="hidden" id="selected-group-val" value="">
+          </div>
+
+          <!-- Step 2: Input Kode Cryptogram -->
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <div class="flex justify-between items-center mb-1">
+              <label class="block text-xs font-bold text-slate-300">2. Masukkan Kode Cryptogram Kelompok:</label>
+              <button type="button" onclick="toggleCheatKey('${crypto.key}')" class="text-[10px] text-amber-400 hover:underline cursor-pointer">
+                <i class="fa-solid fa-eye mr-1"></i>Lihat Kunci Kode
+              </button>
+            </div>
+            <div class="flex gap-2">
+              <input type="text" id="teacher-crypto-code" placeholder="Misal: VLOOKUP / L" class="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white uppercase focus:outline-none focus:border-amber-500 font-mono tracking-widest">
+              <button type="button" onclick="verifyCodeAndUnlockQuestion(${id})" class="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-lg text-xs transition-colors cursor-pointer">
+                Verifikasi & Buka Soal
+              </button>
+            </div>
+            <div id="teacher-cheat-key" class="mt-2 text-xs font-mono text-amber-300 hidden bg-amber-950/40 p-2 rounded border border-amber-500/30">
+              Kunci Jawaban Soal #${id}: <strong>${crypto.key}</strong> (${crypto.hint})
+            </div>
+            <div id="verify-error" class="mt-2 text-xs font-bold text-rose-400 hidden"></div>
+          </div>
+
+          <!-- Step 3: Soal Excel + Arena Timer -->
+          <div id="excel-question-section" class="hidden space-y-4 pt-3 border-t border-slate-800">
+            <!-- Timer Bar -->
+            <div class="flex items-center justify-between p-2.5 rounded-xl bg-slate-950 border border-slate-800" id="timer-box">
+              <div class="flex items-center gap-2">
+                <i class="fa-solid fa-stopwatch text-amber-400 animate-pulse"></i>
+                <span class="text-xs font-bold text-slate-300">Timer arena CoC:</span>
+              </div>
+              <div class="flex items-center gap-3">
+                <span id="question-timer" class="text-lg font-black font-mono text-amber-400">60s</span>
+                <button onclick="startArenaTimer()" id="btn-start-timer" class="px-2.5 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 text-[11px] font-bold cursor-pointer">
+                  Mulai Timer
+                </button>
+              </div>
+            </div>
+
+            <div class="p-4 rounded-xl bg-slate-950 border border-sky-500/30">
+              <span class="text-xs font-bold text-sky-400 uppercase tracking-wider block mb-1">Pertanyaan VLOOKUP #${id}:</span>
+              <p class="text-base font-semibold text-white leading-relaxed whitespace-pre-line">${excel.q}</p>
+              ${tableHtml}
+            </div>
+
+            <div class="grid grid-cols-1 gap-2.5">
+              ${excel.opts.map((opt, oIdx) => `
+                <button onclick="submitAnswer(${id},${oIdx})" class="p-3 rounded-xl border border-slate-800 bg-slate-900/90 hover:bg-sky-950/50 hover:border-sky-500/50 text-left transition-all flex items-center group cursor-pointer">
+                  <span class="w-7 h-7 rounded-lg bg-slate-800 text-slate-300 group-hover:bg-sky-500 group-hover:text-white flex items-center justify-center font-bold text-xs mr-3 shrink-0">
+                    ${String.fromCharCode(65 + oIdx)}
+                  </span>
+                  <span class="text-sm font-medium text-slate-200 group-hover:text-white">${opt}</span>
+                </button>
+              `).join('')}
+            </div>
+          </div>
+        </div>
+      `;
+
+      openModal();
+    }
+
+    window.startArenaTimer = () => {
+      playSound('click');
+      if (window.timerInterval) clearInterval(window.timerInterval);
+      window.timerSeconds = 60;
+      const display = document.getElementById('question-timer');
+      const btn = document.getElementById('btn-start-timer');
+      if (btn) btn.disabled = true;
+
+      window.timerInterval = setInterval(() => {
+        window.timerSeconds--;
+        if (display) display.innerText = `${window.timerSeconds}s`;
+        if (window.timerSeconds <= 10 && window.timerSeconds > 0) {
+          playSound('tick');
+        }
+        if (window.timerSeconds <= 0) {
+          clearInterval(window.timerInterval);
+          playSound('wrong');
+          if (display) display.innerText = "WAKTU HABIS!";
+        }
+      }, 1000);
+    };
+
+    window.selectTeacherGroup = (grpName) => {
+      playSound('click');
+      document.getElementById('selected-group-val').value = grpName;
+      document.querySelectorAll('.group-select-btn').forEach(btn => {
+        btn.classList.remove('border-sky-500', 'bg-sky-600/30', 'text-white');
+        if (btn.innerText.trim() === grpName) {
+          btn.classList.add('border-sky-500', 'bg-sky-600/30', 'text-white');
+        }
+      });
+    };
+
+    window.toggleCheatKey = (key) => {
+      const el = document.getElementById('teacher-cheat-key');
+      if (el) el.classList.toggle('hidden');
+    };
+
+    window.verifyCodeAndUnlockQuestion = (id) => {
+      const grp = document.getElementById('selected-group-val').value;
+      const inputCode = document.getElementById('teacher-crypto-code').value.trim().toUpperCase();
+      const crypto = cryptograms.find(c => c.id === id);
+      const errEl = document.getElementById('verify-error');
+
+      if (!grp) {
+        errEl.innerText = "Pilih Kelompok terlebih dahulu!";
+        errEl.classList.remove('hidden');
+        playSound('wrong');
+        return;
+      }
+
+      if (inputCode !== crypto.key) {
+        errEl.innerText = `Kode Cryptogram Salah! (Input: "${inputCode}"). Silakan periksa kembali jawaban murid.`;
+        errEl.classList.remove('hidden');
+        playSound('wrong');
+        return;
+      }
+
+      playSound('correct');
+      errEl.classList.add('hidden');
+      document.getElementById('excel-question-section').classList.remove('hidden');
+      document.getElementById('teacher-crypto-code').disabled = true;
+    };
+
+    window.submitAnswer = async (qId, selectedOptionIdx) => {
+      if (window.timerInterval) clearInterval(window.timerInterval);
+      const grp = document.getElementById('selected-group-val').value;
+      const excel = excelQuestions.find(e => e.id === qId);
+
+      if (selectedOptionIdx === excel.ans) {
+        playSound('correct');
+
+        const answerPayload = {
+          questionId: qId,
+          group: grp,
+          points: excel.pts,
+          timestamp: new Date().toISOString()
+        };
+
+        // Check if database & user are ready before performing Firebase write
+        if (db && currentUser) {
+          try {
+            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'answers', `ans_${qId}`);
+            await setDoc(docRef, answerPayload);
+          } catch (e) {
+            console.error("Firestore Write Error:", e);
+            answeredQuestions[qId] = answerPayload;
+            localStorage.setItem('coc_vlookup_answers', JSON.stringify(answeredQuestions));
+            renderGameGrid();
+            renderScoreboard();
+          }
+        } else {
+          answeredQuestions[qId] = answerPayload;
+          localStorage.setItem('coc_vlookup_answers', JSON.stringify(answeredQuestions));
+          renderGameGrid();
+          renderScoreboard();
+        }
+
+        closeModal();
+        showResultAlert(true, `🎉 JAWABAN BENAR!\n\n${grp} berhasil mendapatkan +${excel.pts} Poin dari Soal #${qId}!`);
+      } else {
+        playSound('wrong');
+        closeModal();
+        showResultAlert(false, `❌ JAWABAN SALAH!\n\nPilihan yang dipilih oleh ${grp} kurang tepat.`);
+      }
+    };
+
+    function showResultAlert(isSuccess, message) {
+      const alertModal = document.getElementById('result-alert-modal');
+      const iconContainer = document.getElementById('result-alert-icon');
+      const textContainer = document.getElementById('result-alert-text');
+
+      if (isSuccess) {
+        iconContainer.innerHTML = `<i class="fa-solid fa-circle-check text-5xl text-emerald-400"></i>`;
+      } else {
+        iconContainer.innerHTML = `<i class="fa-solid fa-circle-xmark text-5xl text-rose-500"></i>`;
+      }
+
+      textContainer.innerText = message;
+      alertModal.classList.remove('hidden');
+    }
+
+    window.closeResultAlert = () => {
+      playSound('click');
+      document.getElementById('result-alert-modal').classList.add('hidden');
+    };
+
+    window.showAllCryptogramKeys = () => {
+      playSound('click');
+      document.getElementById('modal-title').innerText = "KUNCI JAWABAN CRYPTOGRAM (1 - 50)";
+      document.getElementById('modal-body').innerHTML = `
+        <div class="max-h-[60vh] overflow-y-auto pr-2 space-y-2 font-mono text-xs">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+            ${cryptograms.map(c => `
+              <div class="p-2.5 rounded-lg bg-slate-900 border border-slate-800 flex justify-between items-center">
+                <div>
+                  <span class="text-sky-400 font-bold">#${c.id}</span> 
+                  <span class="text-slate-400 ml-1">(${c.type})</span>
+                  <div class="text-[11px] text-slate-300 mt-0.5">${c.q}</div>
+                </div>
+                <div class="text-right shrink-0 ml-2">
+                  <span class="px-2 py-1 rounded bg-amber-500/20 text-amber-300 font-bold border border-amber-500/30">${c.key}</span>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+      openModal();
+    };
+
+    window.exportResultsCSV = () => {
+      playSound('click');
+      let csvContent = "data:text/csv;charset=utf-8,Soal ID,Kelompok,Poin,Waktu\n";
+      Object.values(answeredQuestions).forEach(a => {
+        csvContent += `${a.questionId},"${a.group}",${a.points},"${a.timestamp}"\n`;
+      });
+      const encodedUri = encodeURI(csvContent);
+      const link = document.createElement("a");
+      link.setAttribute("href", encodedUri);
+      link.setAttribute("download", `Hasil_CoC_VLOOKUP_${new Date().toISOString().slice(0,10)}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    };
+
+    window.confirmResetGame = () => {
+      playSound('click');
+      document.getElementById('reset-confirm-modal').classList.remove('hidden');
+    };
+
+    window.closeResetConfirmModal = () => {
+      playSound('click');
+      document.getElementById('reset-confirm-modal').classList.add('hidden');
+    };
+
+    window.executeResetGame = async () => {
+      playSound('click');
+      if (db && currentUser) {
+        try {
+          const answersRef = collection(db, 'artifacts', appId, 'public', 'data', 'answers');
+          const snap = await getDocs(answersRef);
+          snap.forEach(async (d) => {
+            await deleteDoc(d.ref);
+          });
+        } catch (e) { console.error(e); }
+      }
+      answeredQuestions = {};
+      try { localStorage.removeItem('coc_vlookup_answers'); } catch(e){}
+      renderGameGrid();
+      renderScoreboard();
+      document.getElementById('reset-confirm-modal').classList.add('hidden');
+      showResultAlert(true, "Game berhasil di-reset ke kondisi awal!");
+    };
+
+    function openModal() {
+      document.getElementById('game-modal').classList.remove('hidden');
+    }
+
+    window.closeModal = () => {
+      playSound('click');
+      if (window.timerInterval) clearInterval(window.timerInterval);
+      document.getElementById('game-modal').classList.add('hidden');
+    };
+  </script>
+</head>
+
+<body class="min-h-screen flex flex-col justify-between">
+
+  <header class="glass-card sticky top-0 z-40 border-b border-slate-800/80 px-4 py-3">
+    <div class="max-w-7xl mx-auto flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-sky-500 to-indigo-600 flex items-center justify-center text-white font-black text-xl shadow-lg shadow-sky-500/20 mr-3">
+          CoC
+        </div>
+        <div>
+          <h1 class="text-base md:text-lg font-black tracking-tight gradient-text">GROUP BATTLE ARENA</h1>
+          <p class="text-[11px] text-slate-400">Excel VLOOKUP Challenge</p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2 md:gap-3">
+        <button id="mute-btn" onclick="toggleSound()" title="Toggle Sound Effect" class="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition-colors flex items-center justify-center cursor-pointer">
+          <i class="fa-solid fa-volume-high text-sky-400"></i>
+        </button>
+        <div id="role-badge" class="hidden"></div>
+        <button onclick="location.reload()" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition-colors flex items-center gap-1.5 cursor-pointer">
+          <i class="fa-solid fa-arrows-rotate"></i> Ganti Peran
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 space-y-6" id="app-container">
+
+    <!-- ROLE SELECTION SCREEN -->
+    <div id="role-selection-screen" class="min-h-[75vh] flex flex-col items-center justify-center my-auto">
+      <div class="text-center max-w-xl mx-auto mb-8 space-y-3">
+        <span class="px-3 py-1 rounded-full bg-sky-500/10 text-sky-400 border border-sky-500/20 text-xs font-bold uppercase tracking-widest">
+          Interaktif & Realtime
+        </span>
+        <h2 class="text-3xl md:text-4xl font-extrabold text-white tracking-tight">Pilih Tampilan Peran Anda</h2>
+        <p class="text-sm text-slate-400">Pilih mode tampilan sesuai dengan peran Anda di dalam kelas saat ini.</p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-2xl">
+        <!-- Murid Card -->
+        <button onclick="selectRole('student')" class="glass-card p-6 rounded-3xl border border-slate-800 hover:border-sky-500/50 text-left transition-all duration-300 hover:-translate-y-1.5 group relative overflow-hidden cursor-pointer">
+          <div class="w-14 h-14 rounded-2xl bg-cyan-500/20 text-cyan-400 flex items-center justify-center text-2xl mb-4 group-hover:scale-110 transition-transform">
+            <i class="fa-solid fa-graduation-cap"></i>
+          </div>
+          <h3 class="text-xl font-bold text-white group-hover:text-cyan-400 mb-1">Tampilan Murid</h3>
+          <p class="text-xs text-slate-400 leading-relaxed mb-4">
+            Buka grid 1-50, pecahkan kode Cryptogram kelompokmu, lalu maju ke meja Guru untuk membuka soal VLOOKUP!
+          </p>
+          <span class="text-xs font-bold text-cyan-400 flex items-center gap-1">
+            Masuk Mode Murid <i class="fa-solid fa-arrow-right text-[10px]"></i>
+          </span>
+        </button>
+
+        <!-- Guru Card -->
+        <button onclick="selectRole('teacher')" class="glass-card p-6 rounded-3xl border border-slate-800 hover:border-amber-500/50 text-left transition-all duration-300 hover:-translate-y-1.5 group relative overflow-hidden cursor-pointer">
+          <div class="w-14 h-14 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center text-2xl mb-4 group-hover:scale-110 transition-transform">
+            <i class="fa-solid fa-chalkboard-user"></i>
+          </div>
+          <h3 class="text-xl font-bold text-white group-hover:text-amber-400 mb-1">Tampilan Guru / Host</h3>
+          <p class="text-xs text-slate-400 leading-relaxed mb-4">
+            Verifikasi kode Cryptogram dari siswa, pilih kelompok, dan eksekusi pertanyaan VLOOKUP untuk mencatat poin.
+          </p>
+          <span class="text-xs font-bold text-amber-400 flex items-center gap-1">
+            Masuk Mode Guru <i class="fa-solid fa-lock text-[10px]"></i>
+          </span>
+        </button>
+      </div>
+    </div>
+
+    <!-- MAIN GAME ARENA -->
+    <div id="main-game-screen" class="hidden space-y-6 animate-fade-in">
+
+      <!-- SCOREBOARD SECTION -->
+      <section class="space-y-3">
+        <div class="flex items-center justify-between">
+          <h2 class="text-sm font-bold tracking-wider text-slate-400 uppercase flex items-center gap-2">
+            <i class="fa-solid fa-trophy text-amber-400"></i> Papan Skor Kelompok
+          </h2>
+
+          <div id="teacher-controls" class="hidden flex items-center gap-2">
+            <button onclick="exportResultsCSV()" class="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 text-xs font-bold transition-colors cursor-pointer">
+              <i class="fa-solid fa-file-csv mr-1"></i> Export CSV
+            </button>
+            <button onclick="showAllCryptogramKeys()" class="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 text-xs font-bold transition-colors cursor-pointer">
+              <i class="fa-solid fa-key mr-1"></i> Kunci Cryptogram
+            </button>
+            <button onclick="confirmResetGame()" class="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-xs font-bold transition-colors cursor-pointer">
+              <i class="fa-solid fa-rotate-left mr-1"></i> Reset
+            </button>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2.5" id="scoreboard-container">
+        </div>
+
+        <!-- Global Progress Bar -->
+        <div class="glass-card p-3 rounded-2xl flex items-center justify-between gap-4">
+          <div class="text-xs font-bold text-slate-300 whitespace-nowrap">Progress Arena:</div>
+          <div class="flex-1 bg-slate-900 h-2.5 rounded-full overflow-hidden border border-slate-800">
+            <div id="total-progress-bar" class="bg-gradient-to-r from-sky-500 to-indigo-500 h-full transition-all duration-500" style="width: 0%"></div>
+          </div>
+          <span id="total-progress-text" class="text-xs font-mono font-bold text-sky-400 whitespace-nowrap">0 / 50 Selesai</span>
+        </div>
+      </section>
+
+      <!-- GRID SOAL 1 - 50 -->
+      <section class="space-y-3">
+        <div class="flex items-center justify-between">
+          <h2 class="text-sm font-bold tracking-wider text-slate-400 uppercase flex items-center gap-2">
+            <i class="fa-solid fa-border-all text-sky-400"></i> Matriks 50 Soal Cryptogram & VLOOKUP
+          </h2>
+          <div class="flex items-center gap-3 text-[11px] text-slate-400">
+            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full bg-emerald-400"></span> Easy (10-30 Pts)</span>
+            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span> Med (40-60 Pts)</span>
+            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full bg-rose-400"></span> Hard (70-100 Pts)</span>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-10 gap-2.5" id="grid-container">
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <!-- PIN VERIFICATION MODAL -->
+  <div id="pin-modal" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 hidden">
+    <div class="glass-card max-w-sm w-full rounded-3xl border border-slate-700/80 p-6 shadow-2xl relative">
+      <button onclick="closePinModal()" class="absolute top-4 right-4 w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+      <div class="text-center mb-5">
+        <div class="w-12 h-12 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center text-xl mx-auto mb-2 border border-amber-500/30">
+          <i class="fa-solid fa-lock"></i>
+        </div>
+        <h3 class="text-base font-bold text-white">Masukkan PIN Guru</h3>
+      </div>
+      <div class="space-y-3">
+        <input type="password" id="teacher-pin-input" placeholder="Masukkan PIN..." class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2.5 text-center text-white text-base font-mono tracking-widest focus:outline-none focus:border-amber-500">
+        <div id="pin-error-msg" class="text-xs text-rose-400 text-center font-bold hidden"></div>
+        <button onclick="verifyTeacherPin()" class="w-full py-2.5 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-xl text-sm transition-colors cursor-pointer">
+          Verifikasi PIN
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MAIN GAME MODAL COMPONENT -->
+  <div id="game-modal" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 hidden">
+    <div class="glass-card max-w-xl w-full rounded-3xl border border-slate-700/80 p-6 shadow-2xl relative animate-scale-up">
+      <button onclick="closeModal()" class="absolute top-4 right-4 w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+
+      <h3 id="modal-title" class="text-lg font-black text-white pr-8 mb-4 border-b border-slate-800 pb-3">
+        TITLE
+      </h3>
+
+      <div id="modal-body">
+      </div>
+    </div>
+  </div>
+
+  <!-- RESULT ALERT MODAL -->
+  <div id="result-alert-modal" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 hidden">
+    <div class="glass-card max-w-sm w-full rounded-3xl border border-slate-700 p-6 shadow-2xl text-center space-y-4">
+      <div id="result-alert-icon" class="flex justify-center"></div>
+      <div id="result-alert-text" class="text-sm font-bold text-white whitespace-pre-line leading-relaxed"></div>
+      <button onclick="closeResultAlert()" class="w-full py-2.5 bg-sky-600 hover:bg-sky-500 text-white font-bold rounded-xl text-sm transition-colors cursor-pointer">
+        Tutup
+      </button>
+    </div>
+  </div>
+
+  <!-- RESET CONFIRMATION MODAL -->
+  <div id="reset-confirm-modal" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 hidden">
+    <div class="glass-card max-w-sm w-full rounded-3xl border border-rose-500/30 p-6 shadow-2xl text-center space-y-4">
+      <div class="w-12 h-12 rounded-2xl bg-rose-500/20 text-rose-400 flex items-center justify-center text-2xl mx-auto border border-rose-500/30">
+        <i class="fa-solid fa-triangle-exclamation"></i>
+      </div>
+      <h3 class="text-base font-bold text-white">Konfirmasi Reset Game</h3>
+      <p class="text-xs text-slate-400 leading-relaxed">
+        Apakah Anda yakin ingin MENGHAPUS SEMUA DATA SKOR dan mengulang game dari awal?
+      </p>
+      <div class="flex gap-2 pt-2">
+        <button onclick="closeResetConfirmModal()" class="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-xl text-xs transition-colors cursor-pointer">
+          Batal
+        </button>
+        <button onclick="executeResetGame()" class="flex-1 py-2.5 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded-xl text-xs transition-colors cursor-pointer">
+          Ya, Reset
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <footer class="py-4 border-t border-slate-800/80 text-center text-xs text-slate-500 mt-8">
+    <p>SMP YPS Singkole &bull; Group Battle Arena &bull; Dikembangkan oleh Fitriyah Salsabilah, S.Kom.</p>
+  </footer>
+
+</body>
+</html>
